@@ -50,3 +50,5 @@ crash_logs.txt
 # Python
 __pycache__/
 *.pyc
+venv_onnx/
+.venv_onnx/
