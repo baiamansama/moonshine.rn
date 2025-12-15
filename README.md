@@ -1,10 +1,12 @@
-# Moonshine Arabic - Live Transcription
+# Moonshine ASR - React Native
 
-On-device Arabic speech-to-text using Moonshine-tiny-ar with React Native ExecuTorch.
+On-device Arabic/English speech-to-text using Moonshine models with ONNX Runtime.
 
-## Status: Waiting for Model Export
+## Status: ONNX Runtime Pipeline Ready
 
-App is ready. Needs `moonshine-tiny-ar` exported to ExecuTorch .pte format.
+- Using `onnxruntime-react-native` for cross-platform inference
+- English model (int8 quantized) included for pipeline validation
+- Arabic export script ready - just run it to get Arabic models
 
 ## Why Moonshine Arabic?
 
@@ -13,41 +15,87 @@ App is ready. Needs `moonshine-tiny-ar` exported to ExecuTorch .pte format.
 | **moonshine-tiny-ar** | 27M | **20.76** |
 | whisper-tiny | 39M | 66.01 |
 
-3x more accurate than Whisper Tiny.
+3x more accurate than Whisper Tiny for Arabic.
 
 ## Stack
 
 - Expo SDK 54 / RN 0.81 / New Architecture
-- react-native-executorch 0.6.0
+- onnxruntime-react-native 1.23.2
 - react-native-audio-api (16kHz capture)
+- react-native-safe-area-context
 
-## Run
+## Quick Start
 
 ```bash
 npm install
-npx expo run:ios   # or android
+npx expo run:ios   # or npx expo run:android
 ```
 
-## Files Needed
+## Project Structure
 
 ```
-assets/models/
-├── moonshine_tiny_ar_encoder_xnnpack.pte
-├── moonshine_tiny_ar_decoder_xnnpack.pte
-└── tokenizer.json
+assets/onnx/                    # English ONNX models (for testing)
+├── encoder_model_int8.onnx     # ~8MB
+├── decoder_model_merged_int8.onnx  # ~20MB
+├── tokenizer.json
+└── tokenizer_config.json
+
+assets/onnx-ar/                 # Arabic ONNX models (after export)
+└── (run export script)
+
+src/
+└── MoonshineONNX.ts            # ONNX inference service
+
+scripts/
+└── export_moonshine_ar_onnx.py # Arabic model export script
 ```
 
-Or hosted at: `software-mansion/react-native-executorch-moonshine-tiny-ar`
+## Exporting Arabic Model to ONNX
 
-## Test with Whisper
+The English model is included for pipeline validation. To get Arabic transcription:
 
-Edit `App.tsx`:
+```bash
+# Install Python dependencies
+pip install transformers optimum[exporters] onnx onnxruntime
+
+# Export Arabic model
+python scripts/export_moonshine_ar_onnx.py --output-dir ./assets/onnx-ar
+
+# With int8 quantization (recommended for mobile)
+python scripts/export_moonshine_ar_onnx.py --output-dir ./assets/onnx-ar --quantize int8
+```
+
+Then update `App.tsx` to point to the Arabic models:
+
 ```typescript
-import { WHISPER_TINY_EN } from 'react-native-executorch';
-// Change model: MOONSHINE_ARABIC_MODEL → WHISPER_TINY_EN
+const ONNX_CONFIG = {
+  encoderAsset: require('./assets/onnx-ar/encoder_model_int8.onnx'),
+  decoderAsset: require('./assets/onnx-ar/decoder_model_merged_int8.onnx'),
+  tokenizerAsset: require('./assets/onnx-ar/tokenizer.json'),
+};
 ```
+
+## How It Works
+
+1. **Audio Capture**: Record 16kHz audio with `react-native-audio-api`
+2. **Preprocessing**: Normalize audio to zero mean/unit variance
+3. **Encoder**: Run audio through ONNX encoder model
+4. **Decoder**: Greedy decode with encoder output (autoregressive)
+5. **Tokenizer**: Decode BPE tokens to text
+
+Key features:
+- No mel spectrogram needed - Moonshine takes raw audio directly
+- Uses RoPE (Rotary Position Embedding) for variable-length audio
+- Optimized for real-time transcription on edge devices
+
+## Model Sources
+
+- English: [onnx-community/moonshine-tiny-ONNX](https://huggingface.co/onnx-community/moonshine-tiny-ONNX)
+- Arabic: [UsefulSensors/moonshine-tiny-ar](https://huggingface.co/UsefulSensors/moonshine-tiny-ar)
+- Docs: [Moonshine on HuggingFace](https://huggingface.co/docs/transformers/en/model_doc/moonshine)
 
 ## Links
 
-- [moonshine-tiny-ar](https://huggingface.co/UsefulSensors/moonshine-tiny-ar)
-- [react-native-executorch](https://docs.swmansion.com/react-native-executorch/)
+- [Moonshine Paper](https://huggingface.co/papers/2410.15608)
+- [ONNX Runtime React Native](https://onnxruntime.ai/docs/tutorials/react-native/)
+- [react-native-audio-api](https://github.com/nickapps-dev/react-native-audio-api)

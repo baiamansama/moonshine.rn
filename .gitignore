@@ -39,3 +39,14 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# local model repos (too large for git)
+moonshine-tiny-ar/
+react-native-executorch/
+
+# crash logs
+crash_logs.txt
+
+# Python
+__pycache__/
+*.pyc

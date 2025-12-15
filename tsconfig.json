@@ -2,5 +2,11 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "**/node_modules",
+    "react-native-executorch/**",
+    "react-native-executorch"
+  ]
 }

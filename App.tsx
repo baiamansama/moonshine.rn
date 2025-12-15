@@ -7,171 +7,183 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
+  Platform,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
-import { useSpeechToText } from 'react-native-executorch';
 import { AudioManager, AudioRecorder } from 'react-native-audio-api';
+import { MoonshineONNX } from './src/MoonshineONNX';
 
 // =============================================================================
-// MOONSHINE ARABIC MODEL CONFIGURATION
+// MOONSHINE ONNX MODEL CONFIGURATION
 // =============================================================================
-// Files needed in assets/models/:
-//   - moonshine_tiny_ar_encoder_xnnpack.pte
-//   - moonshine_tiny_ar_decoder_xnnpack.pte
-//   - tokenizer.json
-//
-// Once exported, uncomment the require() lines below.
+// Using ONNX Runtime for cross-platform inference
+// Models: onnx-community/moonshine-tiny-ONNX (English, quantized int8)
+// For Arabic: Export UsefulSensors/moonshine-tiny-ar to ONNX
 // =============================================================================
 
-// Option 1: Local assets (uncomment when files are available)
-// const MOONSHINE_ARABIC_MODEL = {
-//   isMultilingual: false,
-//   encoderSource: require('./assets/models/moonshine_tiny_ar_encoder_xnnpack.pte'),
-//   decoderSource: require('./assets/models/moonshine_tiny_ar_decoder_xnnpack.pte'),
-//   tokenizerSource: require('./assets/models/tokenizer.json'),
-// };
-
-// Option 2: Remote URLs (for when hosted on HuggingFace)
-const MOONSHINE_ARABIC_MODEL = {
-  isMultilingual: false,
-  encoderSource: 'https://huggingface.co/software-mansion/react-native-executorch-moonshine-tiny-ar/resolve/v0.6.0/xnnpack/moonshine_tiny_ar_encoder_xnnpack.pte',
-  decoderSource: 'https://huggingface.co/software-mansion/react-native-executorch-moonshine-tiny-ar/resolve/v0.6.0/xnnpack/moonshine_tiny_ar_decoder_xnnpack.pte',
-  tokenizerSource: 'https://huggingface.co/software-mansion/react-native-executorch-moonshine-tiny-ar/resolve/v0.6.0/tokenizer.json',
+const ONNX_CONFIG = {
+  encoderAsset: require('./assets/onnx/encoder_model_int8.onnx'),
+  decoderAsset: require('./assets/onnx/decoder_model_merged_int8.onnx'),
+  tokenizerAsset: require('./assets/onnx/tokenizer.json'),
 };
-
-// Option 3: Test with Whisper English (working model)
-// import { WHISPER_TINY_EN } from 'react-native-executorch';
 
 const SAMPLE_RATE = 16000;
 const BUFFER_SIZE = 1600; // 100ms chunks
+const MAX_RECORDING_SECONDS = 10;
+const MAX_AUDIO_CHUNKS = Math.ceil((MAX_RECORDING_SECONDS * SAMPLE_RATE) / BUFFER_SIZE);
+
+const log = (...args: any[]) => console.log(`[App]`, ...args);
 
 function MoonshineApp() {
   const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [hasPermission, setHasPermission] = useState(false);
+  const [transcription, setTranscription] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [modelReady, setModelReady] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
+
   const recorderRef = useRef<AudioRecorder | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const moonshineRef = useRef<MoonshineONNX | null>(null);
 
-  console.log('[App] Mounting with model config');
-
-  const {
-    isReady,
-    isGenerating,
-    downloadProgress,
-    error,
-    committedTranscription,
-    nonCommittedTranscription,
-    stream,
-    streamInsert,
-    streamStop,
-  } = useSpeechToText({
-    model: MOONSHINE_ARABIC_MODEL,
-    // For Whisper test: model: WHISPER_TINY_EN,
-  });
-
+  // Load ONNX models
   useEffect(() => {
-    console.log('[Model]', { isReady, downloadProgress, error: error || 'none' });
-  }, [isReady, downloadProgress, error]);
-
-  useEffect(() => {
-    if (committedTranscription || nonCommittedTranscription) {
-      console.log('[Transcription]', { committedTranscription, nonCommittedTranscription });
-    }
-  }, [committedTranscription, nonCommittedTranscription]);
-
-  useEffect(() => {
-    const setupAudio = async () => {
-      console.log('[Audio] Setup...');
+    const loadModels = async () => {
       try {
-        AudioManager.setAudioSessionOptions({
-          iosCategory: 'playAndRecord',
-          iosMode: 'spokenAudio',
-          iosOptions: ['allowBluetooth', 'defaultToSpeaker'],
+        log('Loading ONNX models...');
+        const moonshine = new MoonshineONNX();
+        await moonshine.load(ONNX_CONFIG, (p) => {
+          setLoadProgress(p);
+          log('Load progress:', Math.round(p * 100) + '%');
         });
-        const status = await AudioManager.requestRecordingPermissions();
-        console.log('[Audio] Permission:', status);
-        setHasPermission(status === 'Granted');
-      } catch (err) {
-        console.error('[Audio] Error:', err);
+        moonshineRef.current = moonshine;
+        setModelReady(true);
+        log('Models loaded successfully');
+      } catch (err: any) {
+        log('Model load error:', err);
+        setError(`Failed to load models: ${err?.message || err}`);
       }
     };
-    setupAudio();
+    loadModels();
+
+    return () => {
+      moonshineRef.current?.dispose();
+    };
   }, []);
 
+  // Request mic permission
+  useEffect(() => {
+    const requestPermission = async () => {
+      try {
+        if (Platform.OS === 'ios') {
+          AudioManager.setAudioSessionOptions({
+            iosCategory: 'playAndRecord',
+            iosMode: 'spokenAudio',
+            iosOptions: ['allowBluetooth', 'defaultToSpeaker'],
+          });
+        }
+        const status = await AudioManager.requestRecordingPermissions();
+        setHasPermission(status === 'Granted');
+        log('Permission:', status);
+      } catch (err: any) {
+        setError(`Permission error: ${err?.message || err}`);
+      }
+    };
+    requestPermission();
+  }, []);
+
+  // Initialize recorder
   useEffect(() => {
     if (!hasPermission) return;
 
-    console.log('[Recorder] Init 16kHz/1600');
     const recorder = new AudioRecorder({
       sampleRate: SAMPLE_RATE,
       bufferLengthInSamples: BUFFER_SIZE,
     });
 
-    let chunks = 0;
     recorder.onAudioReady(({ buffer }) => {
-      chunks++;
-      if (chunks % 10 === 0) console.log('[Recorder] Chunk', chunks);
-      streamInsert(buffer.getChannelData(0));
+      if (audioChunksRef.current.length < MAX_AUDIO_CHUNKS) {
+        audioChunksRef.current.push(new Float32Array(buffer.getChannelData(0)));
+      }
     });
 
     recorderRef.current = recorder;
-    return () => { recorder.stop(); };
-  }, [hasPermission, streamInsert]);
+    log('Recorder initialized');
 
-  const handleStart = useCallback(() => {
-    if (!recorderRef.current || !isReady) return;
-    console.log('[Recording] Start');
-    stream();
+    return () => {
+      recorder.stop();
+    };
+  }, [hasPermission]);
+
+  const handleStartRecording = useCallback(() => {
+    if (!recorderRef.current || !modelReady) {
+      Alert.alert('Not Ready', 'Please wait for models to load');
+      return;
+    }
+    audioChunksRef.current = [];
+    setTranscription('');
+    setError(null);
     recorderRef.current.start();
     setIsRecording(true);
-  }, [isReady, stream]);
+    log('Recording started');
+  }, [modelReady]);
 
-  const handleStop = useCallback(() => {
+  const handleStopRecording = useCallback(async () => {
     if (!recorderRef.current) return;
-    console.log('[Recording] Stop');
+
     recorderRef.current.stop();
-    streamStop();
     setIsRecording(false);
-  }, [streamStop]);
+    log('Recording stopped, chunks:', audioChunksRef.current.length);
 
-  const fullTranscription = `${committedTranscription}${nonCommittedTranscription}`.trim();
+    if (!moonshineRef.current || audioChunksRef.current.length === 0) {
+      setError('No audio recorded');
+      return;
+    }
 
-  // Model not ready - show status
-  if (!isReady) {
-    const isModelMissing = error?.includes('fetch') || error?.includes('401');
+    setIsProcessing(true);
+    setError(null);
 
+    try {
+      // Concatenate audio chunks
+      const totalSamples = audioChunksRef.current.reduce((sum, arr) => sum + arr.length, 0);
+      const audio = new Float32Array(totalSamples);
+      let offset = 0;
+      for (const chunk of audioChunksRef.current) {
+        audio.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      log('Processing audio, samples:', totalSamples, 'duration:', (totalSamples / SAMPLE_RATE).toFixed(2) + 's');
+
+      const result = await moonshineRef.current.transcribe(audio);
+      setTranscription(result);
+    } catch (err: any) {
+      log('Transcription error:', err);
+      setError(`Transcription failed: ${err?.message || err}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, []);
+
+  // Loading state
+  if (!modelReady) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.loadingContainer}>
           {!error && <ActivityIndicator size="large" color="#007AFF" />}
-
-          <Text style={styles.titleArabic}>Moonshine Arabic</Text>
-
-          {downloadProgress > 0 && downloadProgress < 1 && (
+          <Text style={styles.titleText}>Moonshine ASR</Text>
+          <Text style={styles.subtitleText}>ONNX Runtime</Text>
+          {!error && (
             <Text style={styles.progressText}>
-              Downloading: {Math.round(downloadProgress * 100)}%
+              Loading: {Math.round(loadProgress * 100)}%
             </Text>
           )}
-
-          {isModelMissing ? (
-            <View style={styles.infoContainer}>
-              <Text style={styles.infoTitle}>Model Not Available</Text>
-              <Text style={styles.infoText}>
-                Waiting for moonshine-tiny-ar export.
-              </Text>
-              <Text style={styles.infoText}>
-                See MAINTAINER_REQUEST.md
-              </Text>
-              <View style={styles.fileList}>
-                <Text style={styles.fileItem}>• encoder.pte</Text>
-                <Text style={styles.fileItem}>• decoder.pte</Text>
-                <Text style={styles.fileItem}>• tokenizer.json</Text>
-              </View>
-            </View>
-          ) : error ? (
+          {error && (
             <View style={styles.errorContainer}>
               <Text style={styles.errorText}>{error}</Text>
             </View>
-          ) : (
-            <Text style={styles.loadingText}>Loading model...</Text>
           )}
         </View>
         <StatusBar style="auto" />
@@ -179,6 +191,7 @@ function MoonshineApp() {
     );
   }
 
+  // Permission state
   if (!hasPermission) {
     return (
       <SafeAreaView style={styles.container}>
@@ -194,9 +207,9 @@ function MoonshineApp() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.titleArabic}>النسخ المباشر</Text>
-        <Text style={styles.title}>Live Arabic Transcription</Text>
+        <Text style={styles.title}>Live Transcription (ONNX)</Text>
         <Text style={styles.subtitle}>
-          {isGenerating ? 'جاري النسخ...' : 'اضغط للبدء'}
+          {isRecording ? 'Recording...' : isProcessing ? 'Processing...' : 'Tap to start'}
         </Text>
       </View>
 
@@ -204,26 +217,34 @@ function MoonshineApp() {
         style={styles.transcriptionContainer}
         contentContainerStyle={styles.transcriptionContent}
       >
-        {fullTranscription ? (
-          <Text style={styles.transcriptionText}>
-            {committedTranscription}
-            <Text style={styles.pendingText}>{nonCommittedTranscription}</Text>
-          </Text>
+        {transcription ? (
+          <Text style={styles.transcriptionText}>{transcription}</Text>
         ) : (
-          <Text style={styles.placeholderText}>سيظهر كلامك هنا...</Text>
+          <Text style={styles.placeholderText}>Your speech will appear here...</Text>
         )}
       </ScrollView>
+
+      {error && (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      )}
 
       <View style={styles.controls}>
         <TouchableOpacity
           style={[styles.recordButton, isRecording && styles.recordButtonActive]}
-          onPress={isRecording ? handleStop : handleStart}
+          onPress={isRecording ? handleStopRecording : handleStartRecording}
           activeOpacity={0.7}
+          disabled={isProcessing}
         >
-          <View style={[styles.recordButtonInner, isRecording && styles.recordButtonInnerActive]} />
+          {isProcessing ? (
+            <ActivityIndicator color="#FFF" />
+          ) : (
+            <View style={[styles.recordButtonInner, isRecording && styles.recordButtonInnerActive]} />
+          )}
         </TouchableOpacity>
         <Text style={styles.recordLabel}>
-          {isRecording ? 'اضغط للإيقاف' : 'اضغط للتسجيل'}
+          {isRecording ? 'Tap to stop' : isProcessing ? 'Processing...' : 'Tap to record'}
         </Text>
       </View>
 
@@ -243,24 +264,19 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F5F5F7' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  loadingText: { marginTop: 16, fontSize: 16, color: '#8E8E93' },
-  progressText: { marginTop: 12, fontSize: 16, color: '#007AFF', fontWeight: '600' },
-  infoContainer: { marginTop: 20, padding: 20, backgroundColor: '#F0F4FF', borderRadius: 16, maxWidth: 300, alignItems: 'center' },
-  infoTitle: { fontSize: 18, fontWeight: '600', color: '#1C1C1E', marginBottom: 8 },
-  infoText: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 4 },
-  fileList: { marginTop: 12, alignItems: 'flex-start' },
-  fileItem: { fontSize: 13, color: '#007AFF', fontFamily: 'Courier', marginVertical: 2 },
-  errorContainer: { marginTop: 20, padding: 16, backgroundColor: '#FFF5F5', borderRadius: 12, maxWidth: 300 },
+  titleText: { fontSize: 24, fontWeight: '700', color: '#1C1C1E', marginTop: 16 },
+  subtitleText: { fontSize: 14, color: '#8E8E93', marginTop: 4 },
+  progressText: { marginTop: 16, fontSize: 16, color: '#007AFF', fontWeight: '600' },
+  errorContainer: { marginTop: 20, marginHorizontal: 20, padding: 16, backgroundColor: '#FFF5F5', borderRadius: 12 },
   errorText: { fontSize: 14, color: '#FF3B30', textAlign: 'center' },
   header: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12 },
   titleArabic: { fontSize: 28, fontWeight: '700', color: '#1C1C1E', textAlign: 'right', writingDirection: 'rtl' },
   title: { fontSize: 16, fontWeight: '500', color: '#8E8E93', marginTop: 2 },
-  subtitle: { fontSize: 14, color: '#8E8E93', marginTop: 8, textAlign: 'right', writingDirection: 'rtl' },
+  subtitle: { fontSize: 14, color: '#8E8E93', marginTop: 8 },
   transcriptionContainer: { flex: 1, marginHorizontal: 20, marginVertical: 12, backgroundColor: '#FFF', borderRadius: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   transcriptionContent: { padding: 20, minHeight: '100%' },
-  transcriptionText: { fontSize: 22, lineHeight: 36, color: '#1C1C1E', textAlign: 'right', writingDirection: 'rtl' },
-  pendingText: { color: '#8E8E93' },
-  placeholderText: { fontSize: 18, color: '#C7C7CC', fontStyle: 'italic', textAlign: 'right', writingDirection: 'rtl' },
+  transcriptionText: { fontSize: 20, lineHeight: 32, color: '#1C1C1E' },
+  placeholderText: { fontSize: 16, color: '#C7C7CC', fontStyle: 'italic' },
   controls: { alignItems: 'center', paddingVertical: 30 },
   recordButton: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 12, elevation: 4 },
   recordButtonActive: { backgroundColor: '#FFE5E5' },

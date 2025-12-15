@@ -3,7 +3,7 @@ const { wrapWithAudioAPIMetroConfig } = require('react-native-audio-api/metro-co
 
 const defaultConfig = getDefaultConfig(__dirname);
 
-// Add support for .pte and .bin files (for ExecuTorch models)
-defaultConfig.resolver.assetExts.push('pte', 'bin');
+// Add support for .pte, .bin, and .onnx files (for AI models)
+defaultConfig.resolver.assetExts.push('pte', 'bin', 'onnx');
 
 module.exports = wrapWithAudioAPIMetroConfig(defaultConfig);
